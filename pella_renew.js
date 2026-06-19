@@ -1,13 +1,11 @@
 // pella_renew.js
 const { chromium } = require('playwright');
-const { ImapFlow } = require('imapflow');
-const { simpleParser } = require('mailparser');
 const https = require('https');
 const http = require('http');
 const { execSync } = require('child_process');
 
 // ── 配置参数 ────────────────────────────────────────────────
-const PELLA_EMAIL = process.env.PELLA_EMAIL;
+const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 const TIMEOUT = 120000;
 
@@ -85,78 +83,21 @@ const AD_BLOCK_SCRIPT = `
 })();
 `;
 
-// ── IMAP 自动接收最新未读验证码 ──────────────────────────────
-async function getEmailVerificationCode() {
-    const imapConfig = {
-        host: process.env.IMAP_HOST,       // 例如 imap.gmail.com 或 imap.qq.com
-        port: parseInt(process.env.IMAP_PORT || '993'),
-        secure: true,
-        auth: {
-            user: process.env.IMAP_USER,   // 您的邮箱
-            pass: process.env.IMAP_PASS    // 您的邮箱 IMAP 授权密码 (不是网页登录密码)
-        }
-    };
+// ── CF Turnstile 监控及辅助函数 ──────────────────────────────
+const CF_TOKEN_LISTENER_JS = `
+(function() {
+    if (window.__cf_token_listener_injected__) return;
+    window.__cf_token_listener_injected__ = true;
+    window.__cf_turnstile_token__ = '';
+    window.addEventListener('message', function(e) {
+        if (!e.origin || !e.origin.includes('cloudflare.com')) return;
+        var d = e.data;
+        if (!d || d.event !== 'complete' || !d.token) return;
+        window.__cf_turnstile_token__ = d.token;
+    });
+})();
+`;
 
-    if (!imapConfig.host || !imapConfig.auth.user || !imapConfig.auth.pass) {
-        throw new Error('❌ 未配置完整的邮箱 IMAP Secrets (IMAP_HOST, IMAP_USER, IMAP_PASS)');
-    }
-
-    const client = new ImapFlow(imapConfig);
-    await client.connect();
-    const lock = await client.getMailboxLock('INBOX');
-
-    try {
-        // 搜索收件箱里最近未读（unseen）的邮件
-        const messages = [];
-        for await (let msg of client.fetch({ unseen: true }, { source: true, flags: true })) {
-            messages.push(msg);
-        }
-
-        if (messages.length === 0) {
-            return null; // 还没有收到未读邮件，返回 null
-        }
-
-        // 取最新的一封未读邮件
-        const latestMsg = messages[messages.length - 1];
-        
-        // 使用 mailparser 的 simpleParser 对 MIME 源码进行解码（自动解决 base64 / quoted-printable 编码问题）
-        const parsed = await simpleParser(latestMsg.source);
-        const emailContent = parsed.text || parsed.html || '';
-
-        // 正则匹配邮件文本中的 6 位连续数字
-        const codeMatch = emailContent.match(/\b\d{6}\b/);
-        if (codeMatch) {
-            const code = codeMatch[0];
-            // 将这封邮件标记为已读 (\Seen)，避免下次读取到过期的验证码
-            await client.messageFlagsAdd({ uid: latestMsg.uid }, ['\\Seen']);
-            return code;
-        }
-        return null;
-    } finally {
-        lock.release();
-        await client.logout();
-    }
-}
-
-// 轮询邮箱，等待验证码到达
-async function pollForVerificationCode() {
-    const maxAttempts = 12; // 最多尝试 12 次，每次等 10 秒，共 2 分钟
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        console.log(`⏱️ 正在进行第 ${attempt}/${maxAttempts} 次邮件验证码检索...`);
-        try {
-            const code = await getEmailVerificationCode();
-            if (code) {
-                return code;
-            }
-        } catch (e) {
-            console.log(`⚠️ 当前检索发生异常：${e.message}。将在 10 秒后重试...`);
-        }
-        await sleep(10000);
-    }
-    throw new Error('❌ 超过时间限制，未能成功在邮箱中截获 Clerk 验证码。');
-}
-
-// ── 其他辅助函数 ─────────────────────────────────────────────
 function nowStr() {
     return new Date().toLocaleString('zh-CN', {
         timeZone: 'Asia/Shanghai',
@@ -399,8 +340,8 @@ async function handleFitnesstipz(page) {
 
 // ── 核心逻辑 ────────────────────────────────────────────────
 (async () => {
-    if (!PELLA_EMAIL) {
-        throw new Error('❌ 未提供注册邮箱，请在 GitHub Secrets 中配置 PELLA_EMAIL !');
+    if (!PELLA_EMAIL || !PELLA_PASSWORD) {
+        throw new Error('❌ 未提供注册邮箱或密码，请在 GitHub Secrets 中配置 PELLA_ACCOUNT，格式为: 邮箱,密码');
     }
 
     // ── 代理检测 ─────────────────────────────────────────────
@@ -472,7 +413,7 @@ async function handleFitnesstipz(page) {
             console.log('⚠️ 预排查 Cloudflare 拦截时发生非致命异常（可能已被 Clerk 正常重定向跳转）：', e.message);
         }
 
-        // ── 1. 登录流程 ──
+        // ── 1. 邮箱+密码直登流程 ──
         console.log('🔑 访问 Pella 登录页...');
         await page.goto('https://www.pella.app/login', { waitUntil: 'domcontentloaded' });
         await sleep(3000);
@@ -481,21 +422,16 @@ async function handleFitnesstipz(page) {
         await page.waitForSelector('input[name="identifier"], #identifier-field', { timeout: 15000 });
         await page.fill('input[name="identifier"], #identifier-field', PELLA_EMAIL);
 
-        console.log('📤 点击“继续”触发 Clerk 发送邮箱验证码...');
+        console.log('📤 点击“继续”按钮...');
         await page.click('button[type="submit"], button:has-text("继续"), button:has-text("Continue")');
-        
-        // 稍等几秒，让 Clerk 发送信件
-        await sleep(5000);
+        await sleep(3000);
 
-        // ── 2. IMAP 后台轮询邮箱拉取最新验证码 ──
-        console.log('📬 准备从您的邮箱收件箱拉取 6 位数验证码...');
-        const code = await pollForVerificationCode();
-        console.log(`✉️ 成功拦截到验证码: [ ${code} ] ! 准备填入...`);
+        console.log('✏️ 填写密码...');
+        await page.waitForSelector('input[name="password"]', { timeout: 15000 });
+        await page.fill('input[name="password"]', PELLA_PASSWORD);
 
-        // ── 3. 填入动态验证码 ──
-        const codeSelector = 'input[name="code"], input[autocomplete="one-time-code"]';
-        await page.waitForSelector(codeSelector, { timeout: 15000 });
-        await page.fill(codeSelector, code);
+        console.log('📤 提交登录信息...');
+        await page.click('button[type="submit"], button:has-text("继续"), button:has-text("Continue"), button:has-text("登录"), button:has-text("Sign in")');
 
         console.log('⏳ 等待登录跳转...');
         await page.waitForURL(/pella\.app\/home/, { timeout: 45000 });
