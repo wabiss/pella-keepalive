@@ -1,10 +1,13 @@
 // pella_renew.js
 const { chromium } = require('playwright');
+const { ImapFlow } = require('imapflow');
+const { simpleParser } = require('mailparser');
 const https = require('https');
 const http = require('http');
 const { execSync } = require('child_process');
 
 // ── 配置参数 ────────────────────────────────────────────────
+const PELLA_EMAIL = process.env.PELLA_EMAIL;
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 const TIMEOUT = 120000;
 
@@ -82,21 +85,78 @@ const AD_BLOCK_SCRIPT = `
 })();
 `;
 
-// ── CF Turnstile 监控及辅助函数 ──────────────────────────────
-const CF_TOKEN_LISTENER_JS = `
-(function() {
-    if (window.__cf_token_listener_injected__) return;
-    window.__cf_token_listener_injected__ = true;
-    window.__cf_turnstile_token__ = '';
-    window.addEventListener('message', function(e) {
-        if (!e.origin || !e.origin.includes('cloudflare.com')) return;
-        var d = e.data;
-        if (!d || d.event !== 'complete' || !d.token) return;
-        window.__cf_turnstile_token__ = d.token;
-    });
-})();
-`;
+// ── IMAP 自动接收最新未读验证码 ──────────────────────────────
+async function getEmailVerificationCode() {
+    const imapConfig = {
+        host: process.env.IMAP_HOST,       // 例如 imap.gmail.com 或 imap.qq.com
+        port: parseInt(process.env.IMAP_PORT || '993'),
+        secure: true,
+        auth: {
+            user: process.env.IMAP_USER,   // 您的邮箱
+            pass: process.env.IMAP_PASS    // 您的邮箱 IMAP 授权密码 (不是网页登录密码)
+        }
+    };
 
+    if (!imapConfig.host || !imapConfig.auth.user || !imapConfig.auth.pass) {
+        throw new Error('❌ 未配置完整的邮箱 IMAP Secrets (IMAP_HOST, IMAP_USER, IMAP_PASS)');
+    }
+
+    const client = new ImapFlow(imapConfig);
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+
+    try {
+        // 搜索收件箱里最近未读（unseen）的邮件
+        const messages = [];
+        for await (let msg of client.fetch({ unseen: true }, { source: true, flags: true })) {
+            messages.push(msg);
+        }
+
+        if (messages.length === 0) {
+            return null; // 还没有收到未读邮件，返回 null
+        }
+
+        // 取最新的一封未读邮件
+        const latestMsg = messages[messages.length - 1];
+        
+        // 使用 mailparser 的 simpleParser 对 MIME 源码进行解码（自动解决 base64 / quoted-printable 编码问题）
+        const parsed = await simpleParser(latestMsg.source);
+        const emailContent = parsed.text || parsed.html || '';
+
+        // 正则匹配邮件文本中的 6 位连续数字
+        const codeMatch = emailContent.match(/\b\d{6}\b/);
+        if (codeMatch) {
+            const code = codeMatch[0];
+            // 将这封邮件标记为已读 (\Seen)，避免下次读取到过期的验证码
+            await client.messageFlagsAdd({ uid: latestMsg.uid }, ['\\Seen']);
+            return code;
+        }
+        return null;
+    } finally {
+        lock.release();
+        await client.logout();
+    }
+}
+
+// 轮询邮箱，等待验证码到达
+async function pollForVerificationCode() {
+    const maxAttempts = 12; // 最多尝试 12 次，每次等 10 秒，共 2 分钟
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        console.log(`⏱️ 正在进行第 ${attempt}/${maxAttempts} 次邮件验证码检索...`);
+        try {
+            const code = await getEmailVerificationCode();
+            if (code) {
+                return code;
+            }
+        } catch (e) {
+            console.log(`⚠️ 当前检索发生异常：${e.message}。将在 10 秒后重试...`);
+        }
+        await sleep(10000);
+    }
+    throw new Error('❌ 超过时间限制，未能成功在邮箱中截获 Clerk 验证码。');
+}
+
+// ── 其他辅助函数 ─────────────────────────────────────────────
 function nowStr() {
     return new Date().toLocaleString('zh-CN', {
         timeZone: 'Asia/Shanghai',
@@ -339,6 +399,10 @@ async function handleFitnesstipz(page) {
 
 // ── 核心逻辑 ────────────────────────────────────────────────
 (async () => {
+    if (!PELLA_EMAIL) {
+        throw new Error('❌ 未提供注册邮箱，请在 GitHub Secrets 中配置 PELLA_EMAIL !');
+    }
+
     // ── 代理检测 ─────────────────────────────────────────────
     let proxyConfig = undefined;
     if (process.env.GOST_PROXY) {
@@ -368,78 +432,6 @@ async function handleFitnesstipz(page) {
     });
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
-
-    // ── 彻底重构的 Cookie 净化器 (安全绕过 Playwright 及 Clerk 严苛属性校验) ──
-    const rawInput = process.env.PELLA_COOKIES_JSON || process.env.PELLA_COOKIES_RAW;
-    if (rawInput) {
-        try {
-            const trimmed = rawInput.trim();
-            if (trimmed.startsWith('[')) {
-                const rawCookies = JSON.parse(trimmed);
-                const formattedCookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
-                
-                const cleanCookies = formattedCookies.map(cookie => {
-                    const clean = {
-                        name: cookie.name,
-                        value: cookie.value,
-                        domain: cookie.domain || '.pella.app',
-                        path: cookie.path || '/'
-                    };
-
-                    if (typeof cookie.httpOnly === 'boolean') {
-                        clean.httpOnly = cookie.httpOnly;
-                    }
-
-                    if (typeof cookie.secure === 'boolean') {
-                        clean.secure = cookie.secure;
-                    }
-
-                    if (typeof cookie.expires === 'number') {
-                        clean.expires = cookie.expires;
-                    } else if (typeof cookie.expirationDate === 'number') {
-                        clean.expires = cookie.expirationDate;
-                    }
-
-                    if (typeof cookie.sameSite === 'string' && cookie.sameSite.trim() !== '') {
-                        const s = cookie.sameSite.trim().toLowerCase();
-                        if (s === 'no_restriction' || s === 'none') {
-                            clean.sameSite = 'None';
-                        } else if (s === 'lax') {
-                            clean.sameSite = 'Lax';
-                        } else if (s === 'strict') {
-                            clean.sameSite = 'Strict';
-                        }
-                    }
-                    return clean;
-                });
-
-                await context.addCookies(cleanCookies);
-                console.log(`🍪 成功注入经安全净化后的 ${cleanCookies.length} 个 JSON Cookie！`);
-            } else {
-                console.log('⚠️ 检测到您使用的是 F12 原始 Cookie。由于缺少 httpOnly/secure 等关键安全属性，Clerk 会话极易在 60 秒内失效。');
-                const formattedCookies = trimmed.split(';').map(pair => {
-                    const cookieTrim = pair.trim();
-                    if (!cookieTrim) return null;
-                    const eqIdx = cookieTrim.indexOf('=');
-                    if (eqIdx === -1) return null;
-                    return {
-                        name: cookieTrim.substring(0, eqIdx),
-                        value: cookieTrim.substring(eqIdx + 1),
-                        domain: '.pella.app',
-                        path: '/'
-                    };
-                }).filter(Boolean);
-
-                await context.addCookies(formattedCookies);
-                console.log(`🍪 成功解析并注入 ${formattedCookies.length} 个原始 Cookie！`);
-            }
-        } catch (e) {
-            console.log('❌ 载入或解析 Cookie 失败：', e.message);
-        }
-    } else {
-        console.log('⚠️ 未检测到 PELLA_COOKIES_JSON 或 PELLA_COOKIES_RAW 环境变量，尝试直连中。');
-    }
-
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
     console.log('🚀 浏览器已就绪！');
@@ -458,7 +450,6 @@ async function handleFitnesstipz(page) {
         // ── 解决 accounts.pella.app 的 Cloudflare 潜在拦截 ──
         try {
             console.log('🛡️ 正在预访问 Clerk 认证域名以排查并破解可能存在的 Cloudflare 拦截...');
-            // 预先直达 Clerk 登录域，排除 Cloudflare WAF 对虚拟机 IP 的阻断，成功后写入 cf_clearance 通行证
             await page.goto('https://accounts.pella.app/sign-in', { waitUntil: 'domcontentloaded', timeout: 30000 });
             await sleep(3000);
 
@@ -481,25 +472,40 @@ async function handleFitnesstipz(page) {
             console.log('⚠️ 预排查 Cloudflare 拦截时发生非致命异常（可能已被 Clerk 正常重定向跳转）：', e.message);
         }
 
-        // 访问 Pella 控制台页面（纠正：控制台真实物理路由为 /home，非 /dashboard）
-        console.log('🔑 访问 Pella 页面...');
-        await page.goto('https://pella.app/home', { waitUntil: 'domcontentloaded' });
+        // ── 1. 登录流程 ──
+        console.log('🔑 访问 Pella 登录页...');
+        await page.goto('https://www.pella.app/login', { waitUntil: 'domcontentloaded' });
         await sleep(3000);
 
-        // ── 严格的 Clerk 登录会话判定 ──
-        console.log('⏳ 等待 Clerk session...');
-        let isSessionReady = false;
-        for (let i = 0; i < 30; i++) {
-            isSessionReady = await page.evaluate('!!(window.Clerk && window.Clerk.session)');
-            if (isSessionReady) break;
-            await sleep(500);
-        }
+        console.log('✏️ 填写邮箱...');
+        await page.waitForSelector('input[name="identifier"], #identifier-field', { timeout: 15000 });
+        await page.fill('input[name="identifier"], #identifier-field', PELLA_EMAIL);
 
-        if (isSessionReady) {
-            console.log('🎉 免密直接登录成功！已成功载入 Clerk 会话。');
-        } else {
-            await page.screenshot({ path: 'login_fail.png' }).catch(() => {});
-            throw new Error('❌ Cookie 注入失效，Clerk 会话未能建立。可能您的长效 Cookie 已过期，请重新使用 Cookie-Editor 插件获取最新的 JSON 格式 Cookie。');
+        console.log('📤 点击“继续”触发 Clerk 发送邮箱验证码...');
+        await page.click('button[type="submit"], button:has-text("继续"), button:has-text("Continue")');
+        
+        // 稍等几秒，让 Clerk 发送信件
+        await sleep(5000);
+
+        // ── 2. IMAP 后台轮询邮箱拉取最新验证码 ──
+        console.log('📬 准备从您的邮箱收件箱拉取 6 位数验证码...');
+        const code = await pollForVerificationCode();
+        console.log(`✉️ 成功拦截到验证码: [ ${code} ] ! 准备填入...`);
+
+        // ── 3. 填入动态验证码 ──
+        const codeSelector = 'input[name="code"], input[autocomplete="one-time-code"]';
+        await page.waitForSelector(codeSelector, { timeout: 15000 });
+        await page.fill(codeSelector, code);
+
+        console.log('⏳ 等待登录跳转...');
+        await page.waitForURL(/pella\.app\/home/, { timeout: 45000 });
+        console.log(`✅ 登录成功！当前页面：${page.url()}`);
+
+        // 等待 Clerk session 加载
+        console.log('⏳ 等待 Clerk session...');
+        for (let i = 0; i < 20; i++) {
+            if (await page.evaluate('!!(window.Clerk && window.Clerk.session)')) break;
+            await sleep(500);
         }
 
         // 获取 JWT Token
