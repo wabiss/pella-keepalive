@@ -369,30 +369,48 @@ async function handleFitnesstipz(page) {
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
 
-    // ── 解析并注入 F12 获取的原始 Cookie ───────────────────────
-    if (process.env.PELLA_COOKIES_RAW) {
+    // ── 智能兼容注入 Cookie (优先使用保留完整安全属性的 JSON) ──
+    const rawInput = process.env.PELLA_COOKIES_JSON || process.env.PELLA_COOKIES_RAW;
+    if (rawInput) {
         try {
-            const rawCookieString = process.env.PELLA_COOKIES_RAW.trim();
-            const formattedCookies = rawCookieString.split(';').map(pair => {
-                const trimmed = pair.trim();
-                if (!trimmed) return null;
-                const eqIdx = trimmed.indexOf('=');
-                if (eqIdx === -1) return null;
-                return {
-                    name: trimmed.substring(0, eqIdx),
-                    value: trimmed.substring(eqIdx + 1),
-                    domain: '.pella.app',
-                    path: '/'
-                };
-            }).filter(Boolean);
+            const trimmed = rawInput.trim();
+            if (trimmed.startsWith('[')) {
+                // 如果是以 [ 开头，表明是用 Cookie-Editor 导出的完美 JSON 格式
+                const rawCookies = JSON.parse(trimmed);
+                const formattedCookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
+                
+                // 自动补齐缺失的关键字段，避免 Playwright 校验报错
+                formattedCookies.forEach(cookie => {
+                    if (!cookie.domain) cookie.domain = '.pella.app';
+                    if (!cookie.path) cookie.path = '/';
+                });
 
-            await context.addCookies(formattedCookies);
-            console.log(`🍪 成功解析并注入 ${formattedCookies.length} 个 Cookie！`);
+                await context.addCookies(formattedCookies);
+                console.log(`🍪 成功注入 ${formattedCookies.length} 个保留完整安全属性的 JSON Cookie！`);
+            } else {
+                // 如果是 F12 请求头中直接复制出来的原始文本
+                console.log('⚠️ 检测到您使用的是 F12 原始 Cookie。由于缺少 httpOnly/secure 等关键安全属性，Clerk 会话极易在 60 秒内失效。');
+                const formattedCookies = trimmed.split(';').map(pair => {
+                    const cookieTrim = pair.trim();
+                    if (!cookieTrim) return null;
+                    const eqIdx = cookieTrim.indexOf('=');
+                    if (eqIdx === -1) return null;
+                    return {
+                        name: cookieTrim.substring(0, eqIdx),
+                        value: cookieTrim.substring(eqIdx + 1),
+                        domain: '.pella.app',
+                        path: '/'
+                    };
+                }).filter(Boolean);
+
+                await context.addCookies(formattedCookies);
+                console.log(`🍪 成功解析并注入 ${formattedCookies.length} 个原始 Cookie！`);
+            }
         } catch (e) {
-            console.log('❌ 解析 PELLA_COOKIES_RAW 环境变量失败：', e.message);
+            console.log('❌ 载入或解析 Cookie 失败：', e.message);
         }
     } else {
-        console.log('⚠️ 未检测到 PELLA_COOKIES_RAW 环境变量，尝试直连（可能导致鉴权失败跳转）。');
+        console.log('⚠️ 未检测到 PELLA_COOKIES_JSON 或 PELLA_COOKIES_RAW 环境变量，尝试直连中。');
     }
 
     const page = await context.newPage();
@@ -415,17 +433,20 @@ async function handleFitnesstipz(page) {
         await page.goto('https://www.pella.app/dashboard', { waitUntil: 'domcontentloaded' });
         await sleep(3000);
 
-        if (page.url().includes('home') || page.url().includes('dashboard')) {
-            console.log('🎉 注入 Cookie 校验成功！已秒进 Dashboard 面板。');
-        } else {
-            throw new Error('❌ Cookie 注入失效，可能您的长效 Cookie 已被主动清除或已过期，请重新使用浏览器 F12 获取最新 Cookie。');
+        // ── 严格的 Clerk 登录会话判定 ──
+        console.log('⏳ 等待 Clerk session...');
+        let isSessionReady = false;
+        for (let i = 0; i < 30; i++) {
+            isSessionReady = await page.evaluate('!!(window.Clerk && window.Clerk.session)');
+            if (isSessionReady) break;
+            await sleep(500);
         }
 
-        // 等待 Clerk session 加载
-        console.log('⏳ 等待 Clerk session...');
-        for (let i = 0; i < 20; i++) {
-            if (await page.evaluate('!!(window.Clerk && window.Clerk.session)')) break;
-            await sleep(500);
+        if (isSessionReady) {
+            console.log('🎉 免密直接登录成功！已成功载入 Clerk 会话。');
+        } else {
+            await page.screenshot({ path: 'login_fail.png' }).catch(() => {});
+            throw new Error('❌ Cookie 注入失效，Clerk 会话未能建立。可能您的长效 Cookie 已过期，请重新使用 Cookie-Editor 插件获取最新的 JSON 格式 Cookie。');
         }
 
         // 获取 JWT Token
