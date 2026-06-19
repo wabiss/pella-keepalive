@@ -2,7 +2,7 @@ name: 🎮 Pella 自动续期
 on:
   schedule:
     - cron: '0 1 * * *'    # 每天固定运行作为备用
-  workflow_dispatch:       # 手动调试触发
+  workflow_dispatch:       # 支持 GitHub 后台手动调试触发
   repository_dispatch:     # cron-job.org 通过 API 触发
     types: [pella_trigger]
 
@@ -26,7 +26,7 @@ jobs:
       - name: 🌐 安装 Playwright 浏览器
         run: npx playwright install chromium --with-deps
 
-      - name: 🛠️ 安装系统依赖 (用于 Turnstile 无头硬件点击模拟)
+      - name: 🛠️ 安装系统依赖 (用于 Turnstile 校验时模拟硬件物理点击)
         run: |
           sudo apt-get update -q
           sudo apt-get install -y xvfb x11-utils xdotool
@@ -46,11 +46,11 @@ jobs:
           echo "✅ GOST 已启动，测试连通性..."
           curl -s -x http://127.0.0.1:8080 https://api.ipify.org
 
-      - name: 🚀 运行续期脚本 (Cookie 直接秒登版)
+      - name: 🚀 运行续期脚本 (通过 F12 原始 Cookie 注入免密运行)
         env:
-          PELLA_COOKIES_JSON: ${{ secrets.PELLA_COOKIES_JSON }}
-          TG_BOT:             ${{ secrets.TG_BOT }}
-          GOST_PROXY:         http://127.0.0.1:8080
+          PELLA_COOKIES_RAW: ${{ secrets.PELLA_COOKIES_RAW }}
+          TG_BOT:            ${{ secrets.TG_BOT }}
+          GOST_PROXY:        http://127.0.0.1:8080
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             node pella_renew.js
