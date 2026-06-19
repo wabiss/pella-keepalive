@@ -32,12 +32,16 @@ jobs:
           sudo apt-get install -y xvfb x11-utils xdotool
 
       - name: 🛡️ 安装并连接 Cloudflare WARP 官方代理
-        uses: fscarmen/warp-on-actions@v1.4  # 👈 修正为正确的 v1.4 版本！
+        uses: fscarmen/warp-on-actions@v1.4  # 👈 WARP 绿色通道
 
-      - name: 🚀 运行续期脚本 (邮箱密码直接秒登)
+      - name: 🚀 运行续期脚本 (IMAP 验证码登录+WARP免拦截)
         env:
-          PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
-          TG_BOT:        ${{ secrets.TG_BOT }}
+          PELLA_EMAIL: ${{ secrets.PELLA_EMAIL }}
+          IMAP_HOST:   imap.gmail.com
+          IMAP_PORT:   993
+          IMAP_USER:   ${{ secrets.PELLA_EMAIL }}  # 直接共用您的邮箱变量
+          IMAP_PASS:   ${{ secrets.IMAP_PASS }}    # 您之前在谷歌后台获取的 16 位应用密码
+          TG_BOT:      ${{ secrets.TG_BOT }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             node pella_renew.js
