@@ -1,11 +1,9 @@
 {
   "name": "pella-renew",
   "version": "1.0.0",
-  "description": "Pella 100% 全自动邮箱登录与保活续期项目",
+  "description": "Pella 100% 全自动免密续期保活项目",
   "main": "pella_renew.js",
   "dependencies": {
-    "playwright": "^1.45.0",
-    "imapflow": "^1.0.17",
-    "mailparser": "^3.7.1"
+    "playwright": "^1.45.0"
   }
 }
