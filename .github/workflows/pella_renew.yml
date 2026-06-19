@@ -26,31 +26,18 @@ jobs:
       - name: 🌐 安装 Playwright 浏览器
         run: npx playwright install chromium --with-deps
 
-      - name: 🛠️ 安装系统依赖 (用于 Turnstile 校验时模拟硬件物理点击)
+      - name: 🛠️ 安装系统依赖 (用于无头浏览器及硬件模拟)
         run: |
           sudo apt-get update -q
           sudo apt-get install -y xvfb x11-utils xdotool
 
-      - name: 🛡️ 启动 GOST 代理转发 (可选)
-        if: ${{ env.GOST_PROXY != '' }}
-        env:
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-        run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
-          sleep 3
-          echo "✅ GOST 已启动，测试连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org
+      - name: 🛡️ 安装并连接 Cloudflare WARP 官方代理
+        uses: fscarmen/warp-on-actions@v2  # 👈 增加这一步，自动在后台建立 Cloudflare 免拦截绿色网络通道！
 
       - name: 🚀 运行续期脚本 (邮箱密码直接秒登)
         env:
           PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
           TG_BOT:        ${{ secrets.TG_BOT }}
-          GOST_PROXY:    http://127.0.0.1:8080
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             node pella_renew.js
