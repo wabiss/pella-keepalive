@@ -369,25 +369,30 @@ async function handleFitnesstipz(page) {
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
 
-    // ── 注入 Cookie (实现免登录直接访问，彻底避开任何验证码) ───────
-    if (process.env.PELLA_COOKIES_JSON) {
+    // ── 解析并注入 F12 获取的原始 Cookie ───────────────────────
+    if (process.env.PELLA_COOKIES_RAW) {
         try {
-            const rawCookies = JSON.parse(process.env.PELLA_COOKIES_JSON);
-            const formattedCookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
-            
-            // 为防止某些插件导出的属性不全，在此预处理并确保 domain 属性存在
-            formattedCookies.forEach(cookie => {
-                if (!cookie.domain) cookie.domain = '.pella.app';
-                if (!cookie.path) cookie.path = '/';
-            });
+            const rawCookieString = process.env.PELLA_COOKIES_RAW.trim();
+            const formattedCookies = rawCookieString.split(';').map(pair => {
+                const trimmed = pair.trim();
+                if (!trimmed) return null;
+                const eqIdx = trimmed.indexOf('=');
+                if (eqIdx === -1) return null;
+                return {
+                    name: trimmed.substring(0, eqIdx),
+                    value: trimmed.substring(eqIdx + 1),
+                    domain: '.pella.app',
+                    path: '/'
+                };
+            }).filter(Boolean);
 
             await context.addCookies(formattedCookies);
-            console.log(`🍪 成功注入 ${formattedCookies.length} 个 Cookie！`);
+            console.log(`🍪 成功解析并注入 ${formattedCookies.length} 个 Cookie！`);
         } catch (e) {
-            console.log('❌ 解析 PELLA_COOKIES_JSON 环境变量失败：', e.message);
+            console.log('❌ 解析 PELLA_COOKIES_RAW 环境变量失败：', e.message);
         }
     } else {
-        console.log('⚠️ 未检测到 PELLA_COOKIES_JSON，正在直接直连，可能导致跳转登录失败。');
+        console.log('⚠️ 未检测到 PELLA_COOKIES_RAW 环境变量，尝试直连（可能导致鉴权失败跳转）。');
     }
 
     const page = await context.newPage();
@@ -405,7 +410,7 @@ async function handleFitnesstipz(page) {
             console.log('⚠️ IP 验证超时，跳过');
         }
 
-        // 验证免验证直接登录效果
+        // 使用注入的 Cookie 直接进入后台
         console.log('🔑 访问 Pella 页面...');
         await page.goto('https://www.pella.app/dashboard', { waitUntil: 'domcontentloaded' });
         await sleep(3000);
@@ -413,7 +418,7 @@ async function handleFitnesstipz(page) {
         if (page.url().includes('home') || page.url().includes('dashboard')) {
             console.log('🎉 注入 Cookie 校验成功！已秒进 Dashboard 面板。');
         } else {
-            throw new Error('❌ Cookie 注入失效，可能您的长效 Cookie 已被主动清除或已过期，请重新获取最新 Cookie。');
+            throw new Error('❌ Cookie 注入失效，可能您的长效 Cookie 已被主动清除或已过期，请重新使用浏览器 F12 获取最新 Cookie。');
         }
 
         // 等待 Clerk session 加载
