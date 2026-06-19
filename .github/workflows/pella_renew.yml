@@ -32,7 +32,7 @@ jobs:
           sudo apt-get install -y xvfb x11-utils xdotool
 
       - name: 🛡️ 安装并连接 Cloudflare WARP 官方代理
-        uses: fscarmen/warp-on-actions@v2  # 👈 增加这一步，自动在后台建立 Cloudflare 免拦截绿色网络通道！
+        uses: fscarmen/warp-on-actions@v1.4  # 👈 修正为正确的 v1.4 版本！
 
       - name: 🚀 运行续期脚本 (邮箱密码直接秒登)
         env:
