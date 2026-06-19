@@ -2,7 +2,6 @@
 const { chromium } = require('playwright');
 const https = require('https');
 const http = require('http');
-const { execSync } = require('child_process');
 
 // ── 配置参数 ────────────────────────────────────────────────
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
@@ -83,30 +82,6 @@ const AD_BLOCK_SCRIPT = `
 })();
 `;
 
-// ── CF Turnstile 监控及辅助函数 ──────────────────────────────
-const CF_TOKEN_LISTENER_JS = `
-(function() {
-    if (window.__cf_token_listener_injected__) return;
-    window.__cf_token_listener_injected__ = true;
-    window.__cf_turnstile_token__ = '';
-    window.addEventListener('message', function(e) {
-        if (!e.origin || !e.origin.includes('cloudflare.com')) return;
-        var d = e.data;
-        if (!d || d.event !== 'complete' || !d.token) return;
-        window.__cf_turnstile_token__ = d.token;
-    });
-})();
-`;
-
-function nowStr() {
-    return new Date().toLocaleString('zh-CN', {
-        timeZone: 'Asia/Shanghai',
-        hour12: false,
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).replace(/\//g, '-');
-}
-
 function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
 }
@@ -119,7 +94,7 @@ function sendTG(result, extra = '') {
         }
         const lines = [
             `🎮 Pella 续期通知`,
-            `🕐 运行时间: ${nowStr()}`,
+            `🕐 运行时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
             `🖥 服务器: Pella Free`,
             `📊 续期结果: ${result}`,
         ];
@@ -139,160 +114,6 @@ function sendTG(result, extra = '') {
         req.write(body);
         req.end();
     });
-}
-
-function xdotoolClick(x, y) {
-    x = Math.round(x);
-    y = Math.round(y);
-    try {
-        const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
-            .toString().trim().split('\n').filter(Boolean);
-        if (wids.length > 0) {
-            execSync(`xdotool windowactivate ${wids[wids.length - 1]}`, { timeout: 2000, stdio: 'ignore' });
-            execSync('sleep 0.2', { stdio: 'ignore' });
-        }
-        execSync(`xdotool mousemove ${x} ${y}`, { timeout: 2000 });
-        execSync('sleep 0.15', { stdio: 'ignore' });
-        execSync('xdotool click 1', { timeout: 2000 });
-        console.log(`📐 xdotool 点击成功: (${x}, ${y})`);
-        return true;
-    } catch (e) {
-        console.log(`⚠️ xdotool 点击失败：${e.message}`);
-        return false;
-    }
-}
-
-async function getWindowOffset(page) {
-    try {
-        const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
-            .toString().trim().split('\n').filter(Boolean);
-        if (wids.length > 0) {
-            const geo = execSync(`xdotool getwindowgeometry --shell ${wids[wids.length - 1]}`, { timeout: 3000 }).toString();
-            const geoDict = {};
-            geo.trim().split('\n').forEach(line => {
-                const [k, v] = line.split('=');
-                if (k && v) geoDict[k.trim()] = parseInt(v.trim());
-            });
-            const winX = geoDict['X'] || 0;
-            const winY = geoDict['Y'] || 0;
-            const info = await page.evaluate('(function(){ return { outer: window.outerHeight, inner: window.innerHeight }; })()');
-            let toolbar = info.outer - info.inner;
-            if (toolbar < 30 || toolbar > 200) toolbar = 87;
-            return { winX, winY, toolbar };
-        }
-    } catch (e) {}
-    const info = await page.evaluate('(function(){ return { screenX: window.screenX||0, screenY: window.screenY||0, outer: window.outerHeight, inner: window.innerHeight }; })()');
-    let toolbar = info.outer - info.inner;
-    if (toolbar < 30 || toolbar > 200) toolbar = 87;
-    return { winX: info.screenX, winY: info.screenY, toolbar };
-}
-
-// ── 智能多段式获取验证坐标 (15秒容错，防止网络慢导致渲染延迟) ──────────────────
-async function getTurnstileCoordsWithRetry(page) {
-    for (let i = 0; i < 15; i++) {
-        const coords = await page.evaluate(`
-            (function(){
-                var container = document.querySelector('.cf-turnstile');
-                if (container) {
-                    var rect = container.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        return { click_x: Math.round(rect.x + 368), click_y: Math.round(rect.y + rect.height / 2) };
-                    }
-                }
-                var iframes = document.querySelectorAll('iframe');
-                for (var i = 0; i < iframes.length; i++) {
-                    var src = iframes[i].src || '';
-                    if (src.includes('cloudflare') || src.includes('turnstile')) {
-                        var rect = iframes[i].getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            return { click_x: Math.round(rect.x + 30), click_y: Math.round(rect.y + rect.height / 2) };
-                        }
-                    }
-                }
-                return null;
-            })()
-        `);
-        if (coords) {
-            console.log(`📐 在第 ${i + 1} 秒检测到验证框，已精准捕获坐标。`);
-            return coords;
-        }
-        await sleep(1000);
-    }
-    return null;
-}
-
-async function checkCFToken(page) {
-    try {
-        const inputOk = await page.evaluate(`
-            (function(){
-                var input = document.querySelector('input[name="cf-turnstile-response"]');
-                return input && input.value && input.value.length > 20;
-            })()
-        `);
-        if (inputOk) return true;
-    } catch (e) {}
-    try {
-        const token = await page.evaluate('window.__cf_turnstile_token__ || ""');
-        if (token && token.length > 20) return true;
-    } catch (e) {}
-    return false;
-}
-
-async function solveTurnstile(page) {
-    await page.evaluate(`
-        (function() {
-            var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
-            if (!turnstileInput) return;
-            var el = turnstileInput;
-            for (var i = 0; i < 20; i++) {
-                el = el.parentElement;
-                if (!el) break;
-                var style = window.getComputedStyle(el);
-                if (style.overflow === 'hidden') el.style.overflow = 'visible';
-                el.style.minWidth = 'max-content';
-            }
-        })()
-    `);
-
-    await page.evaluate(CF_TOKEN_LISTENER_JS);
-    console.log('📡 开始监控 Cloudflare Turnstile Token...');
-
-    if (await checkCFToken(page)) {
-        console.log('✅ 验证已自动通过');
-        return true;
-    }
-
-    await page.evaluate(`
-        var c = document.querySelector('.cf-turnstile');
-        if (c) c.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    `);
-    await sleep(1500);
-
-    const coords = await getTurnstileCoordsWithRetry(page);
-    if (!coords) {
-        console.log('❌ 验证坐标获取失败');
-        await page.screenshot({ path: 'turnstile_no_coords.png' });
-        return false;
-    }
-
-    const { winX, winY, toolbar } = await getWindowOffset(page);
-    const absX = coords.click_x + winX;
-    const absY = coords.click_y + winY + toolbar;
-    console.log('📐 坐标计算完成');
-    xdotoolClick(absX, absY);
-
-    for (let i = 0; i < 60; i++) {
-        await sleep(500);
-        if (await checkCFToken(page)) {
-            const token = await page.evaluate('window.__cf_turnstile_token__ || ""');
-            console.log(`✅ Cloudflare Turnstile 验证通过！token：${token.substring(0, 50)}...`);
-            return true;
-        }
-    }
-
-    console.log('❌ 人机验证超时');
-    await page.screenshot({ path: 'turnstile_fail.png' });
-    return false;
 }
 
 async function handleFitnesstipz(page) {
@@ -353,31 +174,10 @@ async function handleFitnesstipz(page) {
         throw new Error('❌ 未提供注册邮箱或密码，请在 GitHub Secrets 中配置 PELLA_ACCOUNT，格式为: 邮箱,密码');
     }
 
-    // ── 代理检测 ─────────────────────────────────────────────
-    let proxyConfig = undefined;
-    if (process.env.GOST_PROXY) {
-        try {
-            await new Promise((resolve, reject) => {
-                const req = http.request(
-                    { host: '127.0.0.1', port: 8080, path: '/', method: 'GET', timeout: 3000 },
-                    () => resolve()
-                );
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                req.end();
-            });
-            proxyConfig = { server: 'http://127.0.0.1:8080' };
-            console.log('🛡️ 本地代理连通，使用 GOST 转发');
-        } catch {
-            console.log('⚠️ 本地代理不可达，降级为直连');
-        }
-    }
-
     // ── 启动浏览器 ───────────────────────────────────────────
     console.log('🔧 启动浏览器...');
     const browser = await chromium.launch({
         headless: false, // 配合 xvfb 运行有头模式
-        proxy: proxyConfig,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     const context = await browser.newContext();
@@ -397,32 +197,7 @@ async function handleFitnesstipz(page) {
             console.log('⚠️ IP 验证超时，跳过');
         }
 
-        // ── 解决 accounts.pella.app 的 Cloudflare 潜在拦截 ──
-        try {
-            console.log('🛡️ 正在预访问 Clerk 认证域名以排查并破解可能存在的 Cloudflare 拦截...');
-            await page.goto('https://accounts.pella.app/sign-in', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await sleep(3000);
-
-            const hasAuthCF = await page.evaluate(
-                '!!document.querySelector("input[name=\'cf-turnstile-response\']") || document.title.includes("Cloudflare") || document.title.includes("Just a moment")'
-            );
-            if (hasAuthCF) {
-                console.log('🛡️ 检测到 Clerk 认证服务器触发了 Cloudflare 验证盾，启动自动破解器...');
-                const cfOk = await solveTurnstile(page);
-                if (cfOk) {
-                    console.log('✅ Clerk 域名 Cloudflare 盾已成功破解，已注入 cf_clearance 通道！');
-                    await sleep(2000);
-                } else {
-                    console.log('⚠️ Clerk 域名 Cloudflare 破解超时或失败，尝试直接强行继续。');
-                }
-            } else {
-                console.log('✅ Clerk 认证域名当前未受到 Cloudflare 阻断拦截。');
-            }
-        } catch (e) {
-            console.log('⚠️ 预排查 Cloudflare 拦截时发生非致命异常（可能已被 Clerk 正常重定向跳转）：', e.message);
-        }
-
-        // ── 1. 邮箱+密码直登流程 (使用高稳定属性定位，秒开密码框) ──
+        // ── 1. 邮箱+密码直登流程 ──
         console.log('🔑 访问 Pella 登录页...');
         await page.goto('https://www.pella.app/login', { waitUntil: 'domcontentloaded' });
         await sleep(3000);
@@ -432,7 +207,8 @@ async function handleFitnesstipz(page) {
         await page.fill('input[name="identifier"], #identifier-field', PELLA_EMAIL);
 
         console.log('📤 点击“继续”按钮...');
-        await page.click('button[type="submit"], button:has-text("继续"), button:has-text("Continue")');
+        // 关键更正：直接定位 Clerk 表单主按钮，绝不会误触 Google 按钮
+        await page.click('.cl-formButtonPrimary');
         await sleep(3000);
 
         console.log('✏️ 填写密码...');
@@ -440,7 +216,7 @@ async function handleFitnesstipz(page) {
         await page.fill('input[name="password"]', PELLA_PASSWORD);
 
         console.log('📤 提交登录信息...');
-        await page.click('button[type="submit"], button:has-text("继续"), button:has-text("Continue"), button:has-text("登录"), button:has-text("Sign in")');
+        await page.click('.cl-formButtonPrimary');
 
         console.log('⏳ 等待登录跳转...');
         await page.waitForURL(/pella\.app\/home/, { timeout: 45000 });
@@ -493,18 +269,7 @@ async function handleFitnesstipz(page) {
         await sleep(3000);
         console.log(`📄 当前页面: ${page.url()}`);
 
-        // CF Turnstile 校验
-        const hasTurnstile = await page.evaluate('!!document.querySelector("input[name=\'cf-turnstile-response\']")');
-        if (hasTurnstile) {
-            console.log('🛡️ 检测到 CF Turnstile，开始处理...');
-            const cfOk = await solveTurnstile(page);
-            if (!cfOk) {
-                await sendTG('❌ CF Turnstile 验证失败');
-                throw new Error('❌ CF Turnstile 验证失败');
-            }
-        }
-
-        // 点击广告页 of Continue
+        // 点击广告页的 Continue 按钮
         console.log('📤 点击 Continue...');
         try {
             await page.waitForSelector('#continue', { timeout: 10000 });
@@ -529,7 +294,7 @@ async function handleFitnesstipz(page) {
             console.log(`📄 中转后跳转: ${page.url()}`);
         }
 
-        // 处理 tpi.li 倒计时 and 最后跳转
+        // 处理 tpi.li 倒计时和最后跳转
         if (page.url().includes('tpi.li')) {
             console.log('⏳ 等待 tpi.li 倒计时...');
             for (let i = 0; i < 60; i++) {
