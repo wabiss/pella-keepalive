@@ -1,9 +1,11 @@
 {
   "name": "pella-renew",
   "version": "1.0.0",
-  "description": "Pella 100% 自动续期保活项目 (F12 原始 Cookie 注入版)",
+  "description": "Pella 100% 全自动邮箱登录与保活续期项目",
   "main": "pella_renew.js",
   "dependencies": {
-    "playwright": "^1.45.0"
+    "playwright": "^1.45.0",
+    "imapflow": "^1.0.17",
+    "mailparser": "^3.7.1"
   }
 }
