@@ -369,7 +369,7 @@ async function handleFitnesstipz(page) {
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
 
-    // ── 智能兼容注入 Cookie (优先使用保留完整安全属性的 JSON) ──
+    // ── 智能兼容注入 Cookie (增加 sameSite 格式自动修正) ─────────
     const rawInput = process.env.PELLA_COOKIES_JSON || process.env.PELLA_COOKIES_RAW;
     if (rawInput) {
         try {
@@ -379,14 +379,29 @@ async function handleFitnesstipz(page) {
                 const rawCookies = JSON.parse(trimmed);
                 const formattedCookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
                 
-                // 自动补齐缺失的关键字段，避免 Playwright 校验报错
+                // 自动补齐缺失的关键字段并修复 sameSite 校验兼容性
                 formattedCookies.forEach(cookie => {
                     if (!cookie.domain) cookie.domain = '.pella.app';
                     if (!cookie.path) cookie.path = '/';
+                    
+                    // 修复 Playwright 极严苛的 sameSite 校验（ expected one of {Strict|Lax|None} ）
+                    if (cookie.sameSite) {
+                        const s = cookie.sameSite.toLowerCase();
+                        if (s === 'no_restriction' || s === 'none') {
+                            cookie.sameSite = 'None';
+                        } else if (s === 'lax') {
+                            cookie.sameSite = 'Lax';
+                        } else if (s === 'strict') {
+                            cookie.sameSite = 'Strict';
+                        } else {
+                            // 对于 unspecified 或不合规的值，直接移除该属性以防在 addCookies 时抛出异常
+                            delete cookie.sameSite;
+                        }
+                    }
                 });
 
                 await context.addCookies(formattedCookies);
-                console.log(`🍪 成功注入 ${formattedCookies.length} 个保留完整安全属性的 JSON Cookie！`);
+                console.log(`🍪 成功注入并自动修正了 ${formattedCookies.length} 个 JSON Cookie！`);
             } else {
                 // 如果是 F12 请求头中直接复制出来的原始文本
                 console.log('⚠️ 检测到您使用的是 F12 原始 Cookie。由于缺少 httpOnly/secure 等关键安全属性，Clerk 会话极易在 60 秒内失效。');
@@ -478,7 +493,7 @@ async function handleFitnesstipz(page) {
         }
 
         if (!renewLink) {
-            await sendTG('⚠️ 无可用续期链接，今日可能已续期或暂不需要续期');
+            await sendTG('⚠️ 无可用续期链接，今日已续期或暂不需要续期');
             console.log('⚠️ 无可用续期链接，正常退出');
             return;
         }
