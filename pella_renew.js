@@ -375,11 +375,9 @@ async function handleFitnesstipz(page) {
         try {
             const trimmed = rawInput.trim();
             if (trimmed.startsWith('[')) {
-                // 如果是以 [ 开头，表明是用 Cookie-Editor 导出的完美 JSON 格式
                 const rawCookies = JSON.parse(trimmed);
                 const formattedCookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
                 
-                // 重点：清洗组装全新合规对象，彻底剥离 Falsy 值及冗余属性（如 hostOnly, session, storeId）以防崩溃
                 const cleanCookies = formattedCookies.map(cookie => {
                     const clean = {
                         name: cookie.name,
@@ -388,24 +386,20 @@ async function handleFitnesstipz(page) {
                         path: cookie.path || '/'
                     };
 
-                    // 规范化 httpOnly
                     if (typeof cookie.httpOnly === 'boolean') {
                         clean.httpOnly = cookie.httpOnly;
                     }
 
-                    // 规范化 secure
                     if (typeof cookie.secure === 'boolean') {
                         clean.secure = cookie.secure;
                     }
 
-                    // 规范化过期时间 (自动兼容并在 Playwright 下正确应用 expires)
                     if (typeof cookie.expires === 'number') {
                         clean.expires = cookie.expires;
                     } else if (typeof cookie.expirationDate === 'number') {
                         clean.expires = cookie.expirationDate;
                     }
 
-                    // 100% 严密解决 sameSite 格式导致的 Playwright 校验崩溃
                     if (typeof cookie.sameSite === 'string' && cookie.sameSite.trim() !== '') {
                         const s = cookie.sameSite.trim().toLowerCase();
                         if (s === 'no_restriction' || s === 'none') {
@@ -415,17 +409,13 @@ async function handleFitnesstipz(page) {
                         } else if (s === 'strict') {
                             clean.sameSite = 'Strict';
                         }
-                        // 遇到 unspecified 等其他非标准词，在这里直接不设置 sameSite 属性
                     }
-                    // 遇到 null、undefined、空字符串等，直接不复制 sameSite 属性以防报错
-
                     return clean;
                 });
 
                 await context.addCookies(cleanCookies);
                 console.log(`🍪 成功注入经安全净化后的 ${cleanCookies.length} 个 JSON Cookie！`);
             } else {
-                // 如果是 F12 请求头中直接复制出来的原始文本
                 console.log('⚠️ 检测到您使用的是 F12 原始 Cookie。由于缺少 httpOnly/secure 等关键安全属性，Clerk 会话极易在 60 秒内失效。');
                 const formattedCookies = trimmed.split(';').map(pair => {
                     const cookieTrim = pair.trim();
@@ -465,9 +455,35 @@ async function handleFitnesstipz(page) {
             console.log('⚠️ IP 验证超时，跳过');
         }
 
-        // 使用注入的 Cookie 直接进入后台
+        // ── 解决 accounts.pella.app 的 Cloudflare 潜在拦截 ──
+        try {
+            console.log('🛡️ 正在预访问 Clerk 认证域名以排查并破解可能存在的 Cloudflare 拦截...');
+            // 预先直达 Clerk 登录域，排除 Cloudflare WAF 对虚拟机 IP 的阻断，成功后写入 cf_clearance 通行证
+            await page.goto('https://accounts.pella.app/sign-in', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await sleep(3000);
+
+            const hasAuthCF = await page.evaluate(
+                '!!document.querySelector("input[name=\'cf-turnstile-response\']") || document.title.includes("Cloudflare") || document.title.includes("Just a moment")'
+            );
+            if (hasAuthCF) {
+                console.log('🛡️ 检测到 Clerk 认证服务器触发了 Cloudflare 验证盾，启动自动破解器...');
+                const cfOk = await solveTurnstile(page);
+                if (cfOk) {
+                    console.log('✅ Clerk 域名 Cloudflare 盾已成功破解，已注入 cf_clearance 通道！');
+                    await sleep(2000);
+                } else {
+                    console.log('⚠️ Clerk 域名 Cloudflare 破解超时或失败，尝试直接强行继续。');
+                }
+            } else {
+                console.log('✅ Clerk 认证域名当前未受到 Cloudflare 阻断拦截。');
+            }
+        } catch (e) {
+            console.log('⚠️ 预排查 Cloudflare 拦截时发生非致命异常（可能已被 Clerk 正常重定向跳转）：', e.message);
+        }
+
+        // 访问 Pella 控制台页面（纠正：控制台真实物理路由为 /home，非 /dashboard）
         console.log('🔑 访问 Pella 页面...');
-        await page.goto('https://www.pella.app/dashboard', { waitUntil: 'domcontentloaded' });
+        await page.goto('https://pella.app/home', { waitUntil: 'domcontentloaded' });
         await sleep(3000);
 
         // ── 严格的 Clerk 登录会话判定 ──
