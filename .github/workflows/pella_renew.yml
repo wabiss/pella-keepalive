@@ -46,15 +46,11 @@ jobs:
           echo "✅ GOST 已启动，测试连通性..."
           curl -s -x http://127.0.0.1:8080 https://api.ipify.org
 
-      - name: 🚀 运行续期脚本 (IMAP 无感全自动登录)
+      - name: 🚀 运行续期脚本 (邮箱密码直接秒登)
         env:
-          PELLA_EMAIL: ${{ secrets.PELLA_EMAIL }}
-          IMAP_HOST:   ${{ secrets.IMAP_HOST }}
-          IMAP_PORT:   ${{ secrets.IMAP_PORT }}
-          IMAP_USER:   ${{ secrets.IMAP_USER }}
-          IMAP_PASS:   ${{ secrets.IMAP_PASS }}
-          TG_BOT:      ${{ secrets.TG_BOT }}
-          GOST_PROXY:  http://127.0.0.1:8080
+          PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
+          TG_BOT:        ${{ secrets.TG_BOT }}
+          GOST_PROXY:    http://127.0.0.1:8080
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             node pella_renew.js
