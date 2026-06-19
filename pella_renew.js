@@ -187,29 +187,38 @@ async function getWindowOffset(page) {
     return { winX: info.screenX, winY: info.screenY, toolbar };
 }
 
-async function getTurnstileCoords(page) {
-    return await page.evaluate(`
-        (function(){
-            var container = document.querySelector('.cf-turnstile');
-            if (container) {
-                var rect = container.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    return { click_x: Math.round(rect.x + 368), click_y: Math.round(rect.y + rect.height / 2) };
-                }
-            }
-            var iframes = document.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-                var src = iframes[i].src || '';
-                if (src.includes('cloudflare') || src.includes('turnstile')) {
-                    var rect = iframes[i].getBoundingClientRect();
+// ── 智能多段式获取验证坐标 (15秒容错，防止网络慢导致渲染延迟) ──────────────────
+async function getTurnstileCoordsWithRetry(page) {
+    for (let i = 0; i < 15; i++) {
+        const coords = await page.evaluate(`
+            (function(){
+                var container = document.querySelector('.cf-turnstile');
+                if (container) {
+                    var rect = container.getBoundingClientRect();
                     if (rect.width > 0 && rect.height > 0) {
-                        return { click_x: Math.round(rect.x + 30), click_y: Math.round(rect.y + rect.height / 2) };
+                        return { click_x: Math.round(rect.x + 368), click_y: Math.round(rect.y + rect.height / 2) };
                     }
                 }
-            }
-            return null;
-        })()
-    `);
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var src = iframes[i].src || '';
+                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                        var rect = iframes[i].getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            return { click_x: Math.round(rect.x + 30), click_y: Math.round(rect.y + rect.height / 2) };
+                        }
+                    }
+                }
+                return null;
+            })()
+        `);
+        if (coords) {
+            console.log(`📐 在第 ${i + 1} 秒检测到验证框，已精准捕获坐标。`);
+            return coords;
+        }
+        await sleep(1000);
+    }
+    return null;
 }
 
 async function checkCFToken(page) {
@@ -259,7 +268,7 @@ async function solveTurnstile(page) {
     `);
     await sleep(1500);
 
-    const coords = await getTurnstileCoords(page);
+    const coords = await getTurnstileCoordsWithRetry(page);
     if (!coords) {
         console.log('❌ 验证坐标获取失败');
         await page.screenshot({ path: 'turnstile_no_coords.png' });
