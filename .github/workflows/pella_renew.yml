@@ -2,7 +2,7 @@ name: 🎮 Pella 自动续期
 on:
   schedule:
     - cron: '0 1 * * *'    # 每天固定运行作为备用
-  workflow_dispatch:       # 手动调试触发
+  workflow_dispatch:       # 支持 GitHub 后台手动调试触发
   repository_dispatch:     # cron-job.org 通过 API 触发
     types: [pella_trigger]
 
@@ -46,12 +46,15 @@ jobs:
           echo "✅ GOST 已启动，测试连通性..."
           curl -s -x http://127.0.0.1:8080 https://api.ipify.org
 
-      - name: 🚀 运行续期脚本 (Cookie 直接秒登版)
+      - name: 🚀 运行续期脚本 (IMAP 无感全自动登录)
         env:
-          PELLA_COOKIES_JSON: ${{ secrets.PELLA_COOKIES_JSON }}  # 👈 就是这一行，之前漏掉导致变量没传进去！
-          PELLA_COOKIES_RAW:  ${{ secrets.PELLA_COOKIES_RAW }}
-          TG_BOT:             ${{ secrets.TG_BOT }}
-          GOST_PROXY:         http://127.0.0.1:8080
+          PELLA_EMAIL: ${{ secrets.PELLA_EMAIL }}
+          IMAP_HOST:   ${{ secrets.IMAP_HOST }}
+          IMAP_PORT:   ${{ secrets.IMAP_PORT }}
+          IMAP_USER:   ${{ secrets.IMAP_USER }}
+          IMAP_PASS:   ${{ secrets.IMAP_PASS }}
+          TG_BOT:      ${{ secrets.TG_BOT }}
+          GOST_PROXY:  http://127.0.0.1:8080
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             node pella_renew.js
