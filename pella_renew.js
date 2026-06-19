@@ -369,7 +369,7 @@ async function handleFitnesstipz(page) {
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
 
-    // ── 智能兼容注入 Cookie (增加 sameSite 格式自动修正) ─────────
+    // ── 彻底重构的 Cookie 净化器 (安全绕过 Playwright 及 Clerk 严苛属性校验) ──
     const rawInput = process.env.PELLA_COOKIES_JSON || process.env.PELLA_COOKIES_RAW;
     if (rawInput) {
         try {
@@ -379,29 +379,51 @@ async function handleFitnesstipz(page) {
                 const rawCookies = JSON.parse(trimmed);
                 const formattedCookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
                 
-                // 自动补齐缺失的关键字段并修复 sameSite 校验兼容性
-                formattedCookies.forEach(cookie => {
-                    if (!cookie.domain) cookie.domain = '.pella.app';
-                    if (!cookie.path) cookie.path = '/';
-                    
-                    // 修复 Playwright 极严苛的 sameSite 校验（ expected one of {Strict|Lax|None} ）
-                    if (cookie.sameSite) {
-                        const s = cookie.sameSite.toLowerCase();
-                        if (s === 'no_restriction' || s === 'none') {
-                            cookie.sameSite = 'None';
-                        } else if (s === 'lax') {
-                            cookie.sameSite = 'Lax';
-                        } else if (s === 'strict') {
-                            cookie.sameSite = 'Strict';
-                        } else {
-                            // 对于 unspecified 或不合规的值，直接移除该属性以防在 addCookies 时抛出异常
-                            delete cookie.sameSite;
-                        }
+                // 重点：清洗组装全新合规对象，彻底剥离 Falsy 值及冗余属性（如 hostOnly, session, storeId）以防崩溃
+                const cleanCookies = formattedCookies.map(cookie => {
+                    const clean = {
+                        name: cookie.name,
+                        value: cookie.value,
+                        domain: cookie.domain || '.pella.app',
+                        path: cookie.path || '/'
+                    };
+
+                    // 规范化 httpOnly
+                    if (typeof cookie.httpOnly === 'boolean') {
+                        clean.httpOnly = cookie.httpOnly;
                     }
+
+                    // 规范化 secure
+                    if (typeof cookie.secure === 'boolean') {
+                        clean.secure = cookie.secure;
+                    }
+
+                    // 规范化过期时间 (自动兼容并在 Playwright 下正确应用 expires)
+                    if (typeof cookie.expires === 'number') {
+                        clean.expires = cookie.expires;
+                    } else if (typeof cookie.expirationDate === 'number') {
+                        clean.expires = cookie.expirationDate;
+                    }
+
+                    // 100% 严密解决 sameSite 格式导致的 Playwright 校验崩溃
+                    if (typeof cookie.sameSite === 'string' && cookie.sameSite.trim() !== '') {
+                        const s = cookie.sameSite.trim().toLowerCase();
+                        if (s === 'no_restriction' || s === 'none') {
+                            clean.sameSite = 'None';
+                        } else if (s === 'lax') {
+                            clean.sameSite = 'Lax';
+                        } else if (s === 'strict') {
+                            clean.sameSite = 'Strict';
+                        }
+                        // 遇到 unspecified 等其他非标准词，在这里直接不设置 sameSite 属性
+                    }
+                    // 遇到 null、undefined、空字符串等，直接不复制 sameSite 属性以防报错
+
+                    return clean;
                 });
 
-                await context.addCookies(formattedCookies);
-                console.log(`🍪 成功注入并自动修正了 ${formattedCookies.length} 个 JSON Cookie！`);
+                await context.addCookies(cleanCookies);
+                console.log(`🍪 成功注入经安全净化后的 ${cleanCookies.length} 个 JSON Cookie！`);
             } else {
                 // 如果是 F12 请求头中直接复制出来的原始文本
                 console.log('⚠️ 检测到您使用的是 F12 原始 Cookie。由于缺少 httpOnly/secure 等关键安全属性，Clerk 会话极易在 60 秒内失效。');
