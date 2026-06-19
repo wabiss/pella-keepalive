@@ -529,7 +529,7 @@ async function handleFitnesstipz(page) {
             console.log(`📄 中转后跳转: ${page.url()}`);
         }
 
-        // 处理 tpi.li 倒计时和最后跳转
+        // 处理 tpi.li 倒计时 and 最后跳转
         if (page.url().includes('tpi.li')) {
             console.log('⏳ 等待 tpi.li 倒计时...');
             for (let i = 0; i < 60; i++) {
@@ -581,4 +581,22 @@ async function handleFitnesstipz(page) {
         const bodyText = await page.innerText('body');
         const isSuccess = bodyText.toLowerCase().includes('renewed successfully');
 
-        if (
+        if (isSuccess || finalUrl.includes('/renew/')) {
+            console.log('🎉 续期成功！页面显示了 "Server renewed successfully"');
+            await sendTG('✅ 续期成功！');
+        } else {
+            console.log(`⚠️ 续期结果未知，内容不包含成功字样。当前内容: ${bodyText.substring(0, 100)}...`);
+            await sendTG('⚠️ 续期结果未知', `🔗 最终URL: ${finalUrl}`);
+        }
+
+    } catch (e) {
+        await page.screenshot({ path: 'error.png' }).catch(() => {});
+        await sendTG(`❌ 脚本异常：${e.message}`);
+        throw e;
+    } finally {
+        await browser.close();
+    }
+})().catch(err => {
+    console.error('💥 运行时发生未捕获的严重错误：', err);
+    process.exit(1);
+});
