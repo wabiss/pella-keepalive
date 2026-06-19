@@ -1,0 +1,10 @@
+{
+  "name": "pella-renew",
+  "version": "1.0.0",
+  "description": "Pella 自动续期保活项目",
+  "main": "pella_renew.js",
+  "dependencies": {
+    "playwright": "^1.45.0"
+  },
+  "devDependencies": {}
+}
