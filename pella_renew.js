@@ -437,15 +437,18 @@ async function handleFitnesstipz(page) {
 
         console.log('✏️ 填写密码...');
         await page.waitForSelector('input[name="password"]', { timeout: 15000 });
-        await page.fill('input[name="password"]', PELLA_PASSWORD);
+        await page.fill('input[name="password"], input[type="password"]', PELLA_PASSWORD);
 
         console.log('📤 提交登录信息...');
         await page.click('.cl-formButtonPrimary');
 
         console.log('⏳ 等待登录跳转...');
-        // 增宽超时时间至 60000ms，预防 Actions 机房网络偶发延迟
         await page.waitForURL(/pella\.app\/home/, { timeout: 60000 });
         console.log(`✅ 登录成功！当前页面：${page.url()}`);
+
+        // ── 【重大升级】强行等待 5 秒，确保 Pella 面板及后端 API 完全加载就绪 ──
+        console.log('⏳ 正在等待 5 秒，确保控制面板与所有 Clerk 会话状态充分加载与刷新...');
+        await sleep(5000);
 
         // 等待 Clerk session 加载
         console.log('⏳ 等待 Clerk session...');
@@ -494,6 +497,17 @@ async function handleFitnesstipz(page) {
         await sleep(3000);
         console.log(`📄 当前页面: ${page.url()}`);
 
+        // CF Turnstile 校验
+        const hasTurnstile = await page.evaluate('!!document.querySelector("input[name=\'cf-turnstile-response\']")');
+        if (hasTurnstile) {
+            console.log('🛡️ 检测到 CF Turnstile，开始处理...');
+            const cfOk = await solveTurnstile(page);
+            if (!cfOk) {
+                await sendTG('❌ CF Turnstile 验证失败');
+                throw new Error('❌ CF Turnstile 验证失败');
+            }
+        }
+
         // 点击广告页的 Continue 按钮
         console.log('📤 点击 Continue...');
         try {
@@ -502,7 +516,7 @@ async function handleFitnesstipz(page) {
             await sleep(3000);
             console.log(`📄 跳转后: ${page.url()}`);
         } catch (e) {
-            console.log(`⚠️ #continue 未找到：${e.message}`);
+            console.log('⚠️ #continue 未找到，尝试优雅绕过...');
         }
 
         // 处理中间广告跳转（fitnesstipz.com 等）
@@ -582,17 +596,14 @@ async function handleFitnesstipz(page) {
     } catch (e) {
         await page.screenshot({ path: 'error.png' }).catch(() => {});
         await sendTG(`❌ 脚本异常：${e.message}`);
-        throw e; // 向上抛出以触发全局捕获
+        throw e; // 向上抛出以触发最外层异常捕获
     } finally {
         await browser.close();
     }
 })().catch(err => {
-    // ── 【重大升级】将所有运行中非致命错误降级为警告，并以 Exit Code 0 正常退出 ──
-    console.log('\n======================================================');
-    console.log('⚠️ 运行时发生异常（已启动温和保底机制降级为 Warning）：');
-    console.log(err.message);
-    console.log('======================================================\n');
-    
-    // 强行以 0 (成功状态) 退出，彻底消除红牌报警，保护 Actions 运行历史全绿
-    process.exit(0);
+    // ── 【安全安全安全：降级安全拦截】 ──
+    // 只有在“登录成功，但读取到今日无可用续期（无需续期）”时，才是真正的 Exit 0。
+    // 如果是发生未捕获的其他错误，为了能够报警并提示您，我们保留真实的 Exit Code 1。
+    console.error('💥 运行时发生未捕获的严重错误（已报警并上报）：', err.message);
+    process.exit(1); 
 });
