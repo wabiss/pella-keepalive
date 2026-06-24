@@ -454,7 +454,7 @@ async function handleFitnesstipz(page) {
         const servers = serversRes.servers || [];
         if (servers.length === 0) throw new Error('❌ 未找到服务器');
 
-        // ── 【新增功能】多重安全获取服务器 ID 并自动依次重启 ──
+        // ── 【新增功能】多重安全获取服务器 ID 并自动依次执行 [开机] / [自愈重启] ──
         const serverIds = new Set();
         for (const s of servers) {
             const id = s.id || s._id || s.uuid || s.server_id;
@@ -475,7 +475,7 @@ async function handleFitnesstipz(page) {
         }
 
         if (serverIds.size > 0) {
-            console.log(`🔄 检测到 ${serverIds.size} 个服务器，开始执行自动重启流程...`);
+            console.log(`🔄 检测到 ${serverIds.size} 个服务器，开始执行自动控制流程...`);
             for (const id of serverIds) {
                 try {
                     const serverUrl = `https://pella.app/server/${id}`;
@@ -486,18 +486,69 @@ async function handleFitnesstipz(page) {
                     console.log('⏳ 强行等待 5 秒让控制台加载刷新...');
                     await sleep(5000);
 
-                    const restartBtn = page.locator('button, a, [role="button"]').filter({ hasText: /RESTART|Restart|重启/i }).first();
-                    await restartBtn.waitFor({ timeout: 15000 });
-                    console.log(`🔘 定位到服务器 [${id}] 的“重启”按钮，正在点击...`);
-                    await restartBtn.click();
-                    console.log(`✅ 已发送重启指令！等待 5 秒使操作在服务器生效...`);
-                    await sleep(5000);
+                    // 1. 在控制台的隔离作用域检测当前是否处于“离线”状态（即是否存在唯一的 START 启动按钮）
+                    const isOffline = await page.evaluate(() => {
+                        const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                        return buttons.some(btn => {
+                            const txt = btn.innerText.trim().toUpperCase();
+                            return txt === 'START' || txt === '启动';
+                        });
+                    });
+
+                    if (isOffline) {
+                        // 🟢 离线状态：执行强制开机逻辑
+                        console.log(`⚠️ 检测到服务器 [${id}] 当前处于【离线】状态！启动直接开机序列...`);
+                        await page.evaluate(() => {
+                            const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                            const startBtn = buttons.find(btn => {
+                                const txt = btn.innerText.trim().toUpperCase();
+                                return txt === 'START' || txt === '启动';
+                            });
+                            if (startBtn) startBtn.click();
+                        });
+                        console.log('✅ 已向服务器发送 START 开机指令！等待 5 秒确认运行响应...');
+                        await sleep(5000);
+                    } else {
+                        // 🔵 运行状态：执行重启并监控防卡死自愈逻辑
+                        console.log(`🔘 服务器 [${id}] 处于【运行中】状态，正在点击“重启 (RESTART)”按钮...`);
+                        const restartBtn = page.locator('button, a, [role="button"]').filter({ hasText: /RESTART|Restart|重启/i }).first();
+                        await restartBtn.waitFor({ timeout: 15000 });
+                        await restartBtn.click();
+                        
+                        console.log('⏳ 已成功下发重启指令！等待 15 秒观察服务器是否卡死关机...');
+                        await sleep(15000);
+
+                        // 再次进入控制台验证，防止重启过程中“装死”停留在离线状态
+                        const stillOffline = await page.evaluate(() => {
+                            const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                            return buttons.some(btn => {
+                                const txt = btn.innerText.trim().toUpperCase();
+                                return txt === 'START' || txt === '启动';
+                            });
+                        });
+
+                        if (stillOffline) {
+                            console.log(`⚠️ 宿主机调度超时！服务器 [${id}] 重启后卡死在【离线】状态！强行启动自愈开机...`);
+                            await page.evaluate(() => {
+                                const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                                const startBtn = buttons.find(btn => {
+                                    const txt = btn.innerText.trim().toUpperCase();
+                                    return txt === 'START' || txt === '启动';
+                                });
+                                if (startBtn) startBtn.click();
+                            });
+                            console.log('✅ 自愈开机完成！等待 5 秒...');
+                            await sleep(5000);
+                        } else {
+                            console.log(`✅ 服务器 [${id}] 重启及自动重新引导成功！`);
+                        }
+                    }
                 } catch (err) {
-                    console.log(`⚠️ 重启服务器 [${id}] 失败: ${err.message}`);
+                    console.log(`⚠️ 控制服务器 [${id}] 失败: ${err.message}`);
                 }
             }
         } else {
-            console.log('⚠️ 未检测到可用的服务器 ID，跳过重启步骤。');
+            console.log('⚠️ 未检测到可用的服务器 ID，跳过控制步骤。');
         }
 
         // ── 获取续期链接并继续执行常规续期 ──
