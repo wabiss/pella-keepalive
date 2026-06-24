@@ -353,31 +353,10 @@ async function handleFitnesstipz(page) {
         throw new Error('❌ 未提供注册邮箱或密码，请在 GitHub Secrets 中配置 PELLA_ACCOUNT，格式为: 邮箱,密码');
     }
 
-    // ── 代理检测 ─────────────────────────────────────────────
-    let proxyConfig = undefined;
-    if (process.env.GOST_PROXY) {
-        try {
-            await new Promise((resolve, reject) => {
-                const req = http.request(
-                    { host: '127.0.0.1', port: 8080, path: '/', method: 'GET', timeout: 3000 },
-                    () => resolve()
-                );
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                req.end();
-            });
-            proxyConfig = { server: 'http://127.0.0.1:8080' };
-            console.log('🛡️ 本地代理连通，使用 GOST 转发');
-        } catch {
-            console.log('⚠️ 本地代理不可达，降级为直连');
-        }
-    }
-
     // ── 启动浏览器 ───────────────────────────────────────────
     console.log('🔧 启动浏览器...');
     const browser = await chromium.launch({
         headless: false, // 配合 xvfb 运行有头模式
-        proxy: proxyConfig,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     const context = await browser.newContext();
@@ -437,7 +416,7 @@ async function handleFitnesstipz(page) {
 
         console.log('✏️ 填写密码...');
         await page.waitForSelector('input[name="password"]', { timeout: 15000 });
-        await page.fill('input[name="password"], input[type="password"]', PELLA_PASSWORD);
+        await page.fill('input[name="password"]', PELLA_PASSWORD);
 
         console.log('📤 提交登录信息...');
         await page.click('.cl-formButtonPrimary');
@@ -446,7 +425,7 @@ async function handleFitnesstipz(page) {
         await page.waitForURL(/pella\.app\/home/, { timeout: 60000 });
         console.log(`✅ 登录成功！当前页面：${page.url()}`);
 
-        // ── 【重大升级】强行等待 5 秒，确保 Pella 面板及后端 API 完全加载就绪 ──
+        // ── 【重要步骤】强行等待 5 秒，确保 Pella 控制面板及后端 API 状态完全加载就绪 ──
         console.log('⏳ 正在等待 5 秒，确保控制面板与所有 Clerk 会话状态充分加载与刷新...');
         await sleep(5000);
 
@@ -463,7 +442,7 @@ async function handleFitnesstipz(page) {
         if (!token) throw new Error('❌ 无法获取 Clerk token');
         console.log('✅ Token 获取成功');
 
-        // 请求 API 获取服务器列表及续期链接
+        // 请求 API 获取服务器列表
         console.log('🔍 获取服务器续期链接...');
         const serversRes = await page.evaluate(async (t) => {
             const res = await fetch('https://api.pella.app/user/servers', {
@@ -475,12 +454,59 @@ async function handleFitnesstipz(page) {
         const servers = serversRes.servers || [];
         if (servers.length === 0) throw new Error('❌ 未找到服务器');
 
+        // ── 【新增功能】多重安全获取服务器 ID 并自动依次重启 ──
+        const serverIds = new Set();
+        for (const s of servers) {
+            const id = s.id || s._id || s.uuid || s.server_id;
+            if (id) serverIds.add(id);
+        }
+
+        // 备用 DOM 扫描提取
+        try {
+            const domHrefs = await page.$$eval('a', as => as.map(a => a.getAttribute('href') || a.href));
+            for (const href of domHrefs) {
+                const match = href.match(/\/server\/([a-f0-9]{32}|[a-f0-9-]{36})/i);
+                if (match) {
+                    serverIds.add(match[1]);
+                }
+            }
+        } catch (e) {
+            console.log('⚠️ 尝试从网页提取服务器 ID 失败，将使用 API 数据:', e.message);
+        }
+
+        if (serverIds.size > 0) {
+            console.log(`🔄 检测到 ${serverIds.size} 个服务器，开始执行自动重启流程...`);
+            for (const id of serverIds) {
+                try {
+                    const serverUrl = `https://pella.app/server/${id}`;
+                    console.log(`🌐 正在进入服务器控制台: ${serverUrl}`);
+                    await page.goto(serverUrl, { waitUntil: 'domcontentloaded' });
+                    
+                    // 强行静止等待 5 秒让控制面板数据刷新
+                    console.log('⏳ 强行等待 5 秒让控制台加载刷新...');
+                    await sleep(5000);
+
+                    const restartBtn = page.locator('button, a, [role="button"]').filter({ hasText: /RESTART|Restart|重启/i }).first();
+                    await restartBtn.waitFor({ timeout: 15000 });
+                    console.log(`🔘 定位到服务器 [${id}] 的“重启”按钮，正在点击...`);
+                    await restartBtn.click();
+                    console.log(`✅ 已发送重启指令！等待 5 秒使操作在服务器生效...`);
+                    await sleep(5000);
+                } catch (err) {
+                    console.log(`⚠️ 重启服务器 [${id}] 失败: ${err.message}`);
+                }
+            }
+        } else {
+            console.log('⚠️ 未检测到可用的服务器 ID，跳过重启步骤。');
+        }
+
+        // ── 获取续期链接并继续执行常规续期 ──
         let renewLink = null;
         for (const server of servers) {
             const unclaimed = (server.renew_links || []).filter(l => l.claimed === false);
             if (unclaimed.length > 0) {
                 renewLink = unclaimed[0].link;
-                console.log(`✅ 找到续期链接: ${renewLink} (服务器 ${server.ip})`);
+                console.log(`✅ 找到未续期链接: ${renewLink} (服务器 ${server.ip})`);
                 break;
             }
         }
@@ -496,17 +522,6 @@ async function handleFitnesstipz(page) {
         await page.goto(renewLink, { waitUntil: 'domcontentloaded' });
         await sleep(3000);
         console.log(`📄 当前页面: ${page.url()}`);
-
-        // CF Turnstile 校验
-        const hasTurnstile = await page.evaluate('!!document.querySelector("input[name=\'cf-turnstile-response\']")');
-        if (hasTurnstile) {
-            console.log('🛡️ 检测到 CF Turnstile，开始处理...');
-            const cfOk = await solveTurnstile(page);
-            if (!cfOk) {
-                await sendTG('❌ CF Turnstile 验证失败');
-                throw new Error('❌ CF Turnstile 验证失败');
-            }
-        }
 
         // 点击广告页的 Continue 按钮
         console.log('📤 点击 Continue...');
@@ -601,9 +616,9 @@ async function handleFitnesstipz(page) {
         await browser.close();
     }
 })().catch(err => {
-    // ── 【安全安全安全：降级安全拦截】 ──
+    // ── 【真实错误安全报警机制】 ──
     // 只有在“登录成功，但读取到今日无可用续期（无需续期）”时，才是真正的 Exit 0。
-    // 如果是发生未捕获的其他错误，为了能够报警并提示您，我们保留真实的 Exit Code 1。
+    // 如果是发生未捕获的其他非预期致命错误，保留真实的 Exit Code 1 报警，方便您排查！
     console.error('💥 运行时发生未捕获的严重错误（已报警并上报）：', err.message);
     process.exit(1); 
 });
