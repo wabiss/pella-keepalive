@@ -398,7 +398,7 @@ async function handleFitnesstipz(page) {
                 console.log('✅ Clerk 认证域名当前未受到 Cloudflare 阻断拦截。');
             }
         } catch (e) {
-            console.log('⚠️ 预排查 Cloudflare 拦截时发生非致命异常（可能已被 Clerk 正常重定向跳转）：', e.message);
+            console.log('⚠️ 预排查 Cloudflare 拦截时发生 non-fatal 异常（可能已被 Clerk 正常重定向跳转）：', e.message);
         }
 
         // ── 1. 邮箱+密码直登流程 ──
@@ -442,19 +442,29 @@ async function handleFitnesstipz(page) {
         if (!token) throw new Error('❌ 无法获取 Clerk token');
         console.log('✅ Token 获取成功');
 
-        // 请求 API 获取服务器列表
-        console.log('🔍 获取服务器续期链接...');
-        const serversRes = await page.evaluate(async (t) => {
-            const res = await fetch('https://api.pella.app/user/servers', {
-                headers: { 'Authorization': `Bearer ${t}` }
-            });
-            return await res.json();
-        }, token);
+        // 🚀 请求 API 获取服务器列表 🚀
+        // 【关键升级】：直接在 Node.js 环境下发起此 API 数据获取请求！
+        // 从而彻底避开浏览器沙箱对 api.pella.app 发送跨域请求（CORS）产生的 Failed to fetch 拦截错误！
+        console.log('🔍 获取服务器列表信息...');
+        const apiResponse = await fetch('https://api.pella.app/user/servers', {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+                'Origin': 'https://www.pella.app',
+                'Referer': 'https://www.pella.app/'
+            }
+        });
 
+        if (!apiResponse.ok) {
+            throw new Error(`❌ API 请求失败，状态码: ${apiResponse.status}`);
+        }
+
+        const serversRes = await apiResponse.json();
         const servers = serversRes.servers || [];
         if (servers.length === 0) throw new Error('❌ 未找到服务器');
 
-        // ── 【新增功能】多重安全获取服务器 ID 并自动依次执行 [开机] / [自愈重启] ──
+        // ── 【自动重启服务器功能】多重安全获取服务器 ID 并自动依次执行 ──
         const serverIds = new Set();
         for (const s of servers) {
             const id = s.id || s._id || s.uuid || s.server_id;
