@@ -422,7 +422,8 @@ async function handleFitnesstipz(page) {
         await page.click('.cl-formButtonPrimary');
 
         console.log('⏳ 等待登录跳转...');
-        await page.waitForURL(/pella\.app\/home/, { timeout: 60000 });
+        // 【关键修复】：将等待状态优化为 commit，只要 URL 发生跳转即算成功，不等待页面上其他非关键图片/外部静态资源的完全加载！
+        await page.waitForURL(/pella\.app\/home/, { waitUntil: 'commit', timeout: 60000 });
         console.log(`✅ 登录成功！当前页面：${page.url()}`);
 
         // ── 【重要步骤】强行等待 5 秒，确保 Pella 控制面板及后端 API 状态完全加载就绪 ──
@@ -443,8 +444,6 @@ async function handleFitnesstipz(page) {
         console.log('✅ Token 获取成功');
 
         // 🚀 请求 API 获取服务器列表 🚀
-        // 【关键升级】：直接在 Node.js 环境下发起此 API 数据获取请求！
-        // 从而彻底避开浏览器沙箱对 api.pella.app 发送跨域请求（CORS）产生的 Failed to fetch 拦截错误！
         console.log('🔍 获取服务器列表信息...');
         const apiResponse = await fetch('https://api.pella.app/user/servers', {
             headers: {
@@ -649,7 +648,7 @@ async function handleFitnesstipz(page) {
         // 验证最终是否续期成功
         console.log('⏳ 等待跳转至成功页面...');
         try {
-            await page.waitForURL(/pella\.app\/renew\//, { timeout: 15000 });
+            await page.waitForURL(/pella\.app\/renew\//, { waitUntil: 'commit', timeout: 15000 });
         } catch {
             console.log(`⚠️ 未能跳转，当前页面：${page.url()}`);
         }
