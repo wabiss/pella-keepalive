@@ -422,11 +422,10 @@ async function handleFitnesstipz(page) {
         await page.click('.cl-formButtonPrimary');
 
         console.log('⏳ 等待登录跳转...');
-        // 【关键修复】：将等待状态优化为 commit，只要 URL 发生跳转即算成功，不等待页面上其他非关键图片/外部静态资源的完全加载！
         await page.waitForURL(/pella\.app\/home/, { waitUntil: 'commit', timeout: 60000 });
         console.log(`✅ 登录成功！当前页面：${page.url()}`);
 
-        // ── 【重要步骤】强行等待 5 秒，确保 Pella 控制面板及后端 API 状态完全加载就绪 ──
+        // ── 【重要步骤】强行等待 5 秒，确保 Pella 面板及后端 API 状态完全加载就绪 ──
         console.log('⏳ 正在等待 5 秒，确保控制面板与所有 Clerk 会话状态充分加载与刷新...');
         await sleep(5000);
 
@@ -463,7 +462,7 @@ async function handleFitnesstipz(page) {
         const servers = serversRes.servers || [];
         if (servers.length === 0) throw new Error('❌ 未找到服务器');
 
-        // ── 【自动重启服务器功能】多重安全获取服务器 ID 并自动依次执行 ──
+        // ── 【自动重启/自愈开机功能】多重安全获取服务器 ID 并自动处理 ──
         const serverIds = new Set();
         for (const s of servers) {
             const id = s.id || s._id || s.uuid || s.server_id;
@@ -505,7 +504,7 @@ async function handleFitnesstipz(page) {
                     });
 
                     if (isOffline) {
-                        // 🟢 离线状态：执行强制开机逻辑
+                        // 🟢 离线状态：执行强制开机逻辑（绝对安全，防止掉线！）
                         console.log(`⚠️ 检测到服务器 [${id}] 当前处于【离线】状态！启动直接开机序列...`);
                         await page.evaluate(() => {
                             const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
@@ -518,39 +517,9 @@ async function handleFitnesstipz(page) {
                         console.log('✅ 已向服务器发送 START 开机指令！等待 5 秒确认运行响应...');
                         await sleep(5000);
                     } else {
-                        // 🔵 运行状态：执行重启并监控防卡死自愈逻辑
-                        console.log(`🔘 服务器 [${id}] 处于【运行中】状态，正在点击“重启 (RESTART)”按钮...`);
-                        const restartBtn = page.locator('button, a, [role="button"]').filter({ hasText: /RESTART|Restart|重启/i }).first();
-                        await restartBtn.waitFor({ timeout: 15000 });
-                        await restartBtn.click();
-                        
-                        console.log('⏳ 已成功下发重启指令！等待 15 秒观察服务器是否卡死关机...');
-                        await sleep(15000);
-
-                        // 再次进入控制台验证，防止重启过程中“装死”停留在离线状态
-                        const stillOffline = await page.evaluate(() => {
-                            const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-                            return buttons.some(btn => {
-                                const txt = btn.innerText.trim().toUpperCase();
-                                return txt === 'START' || txt === '启动';
-                            });
-                        });
-
-                        if (stillOffline) {
-                            console.log(`⚠️ 宿主机调度超时！服务器 [${id}] 重启后卡死在【离线】状态！强行启动自愈开机...`);
-                            await page.evaluate(() => {
-                                const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-                                const startBtn = buttons.find(btn => {
-                                    const txt = btn.innerText.trim().toUpperCase();
-                                    return txt === 'START' || txt === '启动';
-                                });
-                                if (startBtn) startBtn.click();
-                            });
-                            console.log('✅ 自愈开机完成！等待 5 秒...');
-                            await sleep(5000);
-                        } else {
-                            console.log(`✅ 服务器 [${id}] 重启及自动重新引导成功！`);
-                        }
+                        // 🔵 运行状态：为了极致稳定，跳过主动重启。
+                        // 避免因为 Pella 节点负载高，在“杀死进程（Stop）”后无法再次拉起容器导致卡在离线！
+                        console.log(`✅ 服务器 [${id}] 处于【运行中】状态。为保证 100% 在线，跳过主动重启，保持运行现状。`);
                     }
                 } catch (err) {
                     console.log(`⚠️ 控制服务器 [${id}] 失败: ${err.message}`);
